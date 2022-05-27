@@ -7,6 +7,11 @@
 #include <thrift/transport/TServerSocket.h>
 #include <thrift/transport/TBufferTransports.h>
 #include <iostream>
+#include <thread>
+#include <mutex>
+#include <condition_variable>
+#include <queue>
+#include <vector>
 
 using namespace ::apache::thrift;
 using namespace ::apache::thrift::protocol;
@@ -14,6 +19,51 @@ using namespace ::apache::thrift::transport;
 using namespace ::apache::thrift::server;
 
 using namespace  ::match_service;
+using namespace std;
+
+struct Task {
+    string op;
+    User user;
+};
+
+struct MessageQueue {
+    queue<Task> q;
+    mutex m;
+    condition_variable cv;
+}message_queue;
+
+class Pool {
+    public:
+        void add (const User& user) {
+            users.push_back(user);
+        }
+        void remove(const User& user) {
+            for (uint32_t i = 0; i < users.size(); i ++) {
+                if (users[i].id == user.id) {
+                    users.erase(users.begin() + i);
+                    break;
+                }
+            }
+        }
+        
+        void match() {
+            while (users.size() > 1) {
+                auto p1 = users[0];
+                auto p2 = users[1];
+                users.erase(users.begin());
+                users.erase(users.begin());
+
+                save_results(p1.id, p2.id);
+            }
+        }
+
+        void save_results(int a, int b) {
+            printf("%d and %d match successfully\n", a, b);
+        }
+
+    private:
+        vector<User> users;
+}pool;
 
 class MatchHandler : virtual public MatchIf {
     public:
@@ -24,16 +74,44 @@ class MatchHandler : virtual public MatchIf {
         int32_t add_user(const User& user, const std::string& info) {
             // Your implementation goes here
             printf("add_user\n");
+            unique_lock<mutex> lck(message_queue.m);
+            message_queue.q.push({"add", user});
+            message_queue.cv.notify_all();
             return 0;
         }
 
         int32_t remove_user(const User& user, const std::string& info) {
             // Your implementation goes here
             printf("remove_user\n");
+            unique_lock<mutex> lck(message_queue.m);
+            message_queue.q.push({"remove", user});
+            message_queue.cv.notify_all();
             return 0;
         }
 
 };
+
+void consumer() {
+    while (true) {
+        unique_lock<mutex> lck(message_queue.m);
+        if (message_queue.q.empty()) {
+            message_queue.cv.wait(lck);
+        }
+        else {
+            auto task = message_queue.q.front();
+            message_queue.q.pop();
+
+            lck.unlock();
+            if (task.op == "add") {
+                pool.add(task.user);
+            }
+            else if (task.op == "remove") {
+                pool.remove(task.user);
+            }
+            pool.match();
+        }
+    }
+}
 
 int main(int argc, char **argv) {
     int port = 9090;
@@ -43,6 +121,7 @@ int main(int argc, char **argv) {
     ::std::shared_ptr<TTransportFactory> transportFactory(new TBufferedTransportFactory());
     ::std::shared_ptr<TProtocolFactory> protocolFactory(new TBinaryProtocolFactory());
     ::std::cout << "start match" << std::endl;
+    thread matching_thread(consumer);
     TSimpleServer server(processor, serverTransport, transportFactory, protocolFactory);
     server.serve();
     return 0;
