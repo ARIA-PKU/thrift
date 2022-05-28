@@ -19,6 +19,7 @@
 #include <condition_variable>
 #include <queue>
 #include <vector>
+#include <unistd.h>
 
 using namespace ::apache::thrift;
 using namespace ::apache::thrift::protocol;
@@ -40,41 +41,26 @@ struct MessageQueue {
     condition_variable cv;
 }message_queue;
 
-class Pool {
+class Pool
+{
     public:
-        void add (const User& user) {
-            users.push_back(user);
-        }
-        void remove(const User& user) {
-            for (uint32_t i = 0; i < users.size(); i ++) {
-                if (users[i].id == user.id) {
-                    users.erase(users.begin() + i);
-                    break;
-                }
-            }
-        }
+        void save_result(int a, int b)
+        {
+            printf("Match Result: %d %d\n", a, b);
 
-        void match() {
-            while (users.size() > 1) {
-                auto p1 = users[0];
-                auto p2 = users[1];
-                users.erase(users.begin());
-                users.erase(users.begin());
 
-                save_results(p1.id, p2.id);
-            }
-        }
-
-        void save_results(int a, int b) {
             std::shared_ptr<TTransport> socket(new TSocket("123.57.47.211", 9090));
             std::shared_ptr<TTransport> transport(new TBufferedTransport(socket));
             std::shared_ptr<TProtocol> protocol(new TBinaryProtocol(transport));
-            SaveClient client(protocol);  // 这个是生成的client接口
+            SaveClient client(protocol);
+
             try {
                 transport->open();
-                // 以下实现功能逻辑
-                printf("%d and %d match successfully\n", a, b);
-                client.save_data("acs_2340","5508c7f5", a, b);
+
+                int res = client.save_data("acs_0", "6e822f5b", a, b);
+
+                if (!res) puts("success");
+                else puts("failed");
 
                 transport->close();
             } catch (TException& tx) {
@@ -82,10 +68,71 @@ class Pool {
             }
         }
 
-    private:
+        bool check_match(uint32_t i, uint32_t j)
+        {
+            auto a = users[i], b = users[j];
 
+            int dt = abs(a.score - b.score);
+            int a_max_dif = wt[i] * 50;
+            int b_max_dif = wt[j] * 50;
+
+            return dt <= a_max_dif && dt <= b_max_dif;
+        }
+
+        void match()
+        {
+            for (uint32_t i = 0; i < wt.size(); i ++ )
+                wt[i] ++ ;   // 等待秒数 + 1
+
+            while (users.size() > 1)
+            {
+                bool flag = true;
+                for (uint32_t i = 0; i < users.size(); i ++ )
+                {
+                    for (uint32_t j = i + 1; j < users.size(); j ++ )
+                    {
+                        if (check_match(i, j))
+                        {
+                            auto a = users[i], b = users[j];
+                            users.erase(users.begin() + j);
+                            users.erase(users.begin() + i);
+                            wt.erase(wt.begin() + j);
+                            wt.erase(wt.begin() + i);
+                            save_result(a.id, b.id);
+                            flag = false;
+                            break;
+                        }
+                    }
+
+                    if (!flag) break;
+                }
+
+                if (flag) break;
+            }
+        }
+
+        void add(User user)
+        {
+            users.push_back(user);
+            wt.push_back(0);
+        }
+
+        void remove(User user)
+        {
+            for (uint32_t i = 0; i < users.size(); i ++ )
+                if (users[i].id == user.id)
+                {
+                    users.erase(users.begin() + i);
+                    wt.erase(wt.begin() + i);
+                    break;
+                }
+        }
+
+    private:
         vector<User> users;
+        vector<int> wt;  // 等待时间, 单位：s
 }pool;
+
 
 
 class MatchHandler : virtual public MatchIf {
@@ -140,7 +187,9 @@ void consumer() {
     while (true) {
         unique_lock<mutex> lck(message_queue.m);
         if (message_queue.q.empty()) {
-            message_queue.cv.wait(lck);
+            lck.unlock();
+            pool.match();
+            sleep(1);
         }
         else {
             auto task = message_queue.q.front();
