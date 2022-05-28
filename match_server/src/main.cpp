@@ -5,10 +5,14 @@
 #include "save_client/Save.h"
 #include <thrift/protocol/TBinaryProtocol.h>
 #include <thrift/server/TSimpleServer.h>
+#include <thrift/server/TThreadedServer.h>
 #include <thrift/transport/TServerSocket.h>
 #include <thrift/transport/TBufferTransports.h>
 #include <thrift/transport/TSocket.h>
 #include <thrift/transport/TTransportUtils.h>
+#include <thrift/concurrency/ThreadManager.h>
+#include <thrift/concurrency/ThreadFactory.h>
+#include <thrift/TToString.h>
 #include <iostream>
 #include <thread>
 #include <mutex>
@@ -26,8 +30,8 @@ using namespace ::match_service;
 using namespace std;
 
 struct Task {
-    string op;
     User user;
+    string op;
 };
 
 struct MessageQueue {
@@ -83,6 +87,7 @@ class Pool {
         vector<User> users;
 }pool;
 
+
 class MatchHandler : virtual public MatchIf {
     public:
         MatchHandler() {
@@ -92,21 +97,43 @@ class MatchHandler : virtual public MatchIf {
         int32_t add_user(const User& user, const std::string& info) {
             // Your implementation goes here
             printf("add_user\n");
+
             unique_lock<mutex> lck(message_queue.m);
-            message_queue.q.push({"add", user});
+            message_queue.q.push({user, "add"});
             message_queue.cv.notify_all();
+
             return 0;
         }
 
         int32_t remove_user(const User& user, const std::string& info) {
             // Your implementation goes here
             printf("remove_user\n");
+
             unique_lock<mutex> lck(message_queue.m);
-            message_queue.q.push({"remove", user});
+            message_queue.q.push({user, "remove"});
             message_queue.cv.notify_all();
+
             return 0;
         }
 
+};
+
+class MatchCloneFactory : virtual public MatchIfFactory {
+    public:
+        ~MatchCloneFactory() override = default;
+        MatchIf* getHandler(const ::apache::thrift::TConnectionInfo& connInfo) override
+        {
+            std::shared_ptr<TSocket> sock = std::dynamic_pointer_cast<TSocket>(connInfo.transport);
+            /*cout << "Incoming connection\n";
+              cout << "\tSocketInfo: "  << sock->getSocketInfo() << "\n";
+              cout << "\tPeerHost: "    << sock->getPeerHost() << "\n";
+              cout << "\tPeerAddress: " << sock->getPeerAddress() << "\n";
+              cout << "\tPeerPort: "    << sock->getPeerPort() << "\n";*/
+            return new MatchHandler;
+        }
+        void releaseHandler(MatchIf* handler) override {
+            delete handler;
+        }
 };
 
 void consumer() {
@@ -131,16 +158,16 @@ void consumer() {
     }
 }
 
+
 int main(int argc, char **argv) {
-    int port = 9090;
-    ::std::shared_ptr<MatchHandler> handler(new MatchHandler());
-    ::std::shared_ptr<TProcessor> processor(new MatchProcessor(handler));
-    ::std::shared_ptr<TServerTransport> serverTransport(new TServerSocket(port));
-    ::std::shared_ptr<TTransportFactory> transportFactory(new TBufferedTransportFactory());
-    ::std::shared_ptr<TProtocolFactory> protocolFactory(new TBinaryProtocolFactory());
+    TThreadedServer server(
+            std::make_shared<MatchProcessorFactory>(std::make_shared<MatchCloneFactory>()),
+            std::make_shared<TServerSocket>(9090), //port
+            std::make_shared<TBufferedTransportFactory>(),
+            std::make_shared<TBinaryProtocolFactory>()
+            );
     ::std::cout << "start match" << std::endl;
     thread matching_thread(consumer);
-    TSimpleServer server(processor, serverTransport, transportFactory, protocolFactory);
     server.serve();
     return 0;
 }
